@@ -1,0 +1,8 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+flask>=3.0
+gunicorn>=22.0
+requests
+pandas
+biopython
+torch
+transformers

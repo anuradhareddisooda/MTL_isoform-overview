@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: isoform-overview
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --workers 1 --threads 8 --timeout 120 app:app
+    healthCheckPath: /healthz
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: MAX_CONCURRENT_JOBS
+        value: "1"

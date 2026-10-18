@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Protein isoform overview &amp; alignments</title>
+<style>
+  :root {
+    --bg: #f7f8fa; --card: #fff; --text: #1d2330; --muted: #5d667a; --line: #dde1e8;
+    --accent: #1f5fbf; --accent-text: #fff; --err: #b3261e; --ok: #1b7a43; --code-bg: #f0f2f6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14171d; --card: #1c212a; --text: #e6e9ef; --muted: #9aa3b5; --line: #2d3442;
+      --accent: #5b9bff; --accent-text: #0b1220; --err: #ff8a80; --ok: #6fd39a; --code-bg: #12151b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 20px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+          padding: 18px; margin-bottom: 18px; }
+  label { display: block; font-weight: 600; margin: 14px 0 4px; }
+  label:first-child { margin-top: 0; }
+  .hint { color: var(--muted); font-size: 0.85rem; font-weight: 400; }
+  input[type=text], select, textarea {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--bg); color: var(--text); font: inherit; }
+  textarea { min-height: 110px; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.85rem; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 640px) { .row { grid-template-columns: 1fr; } }
+  .check { display: flex; gap: 8px; align-items: center; font-weight: 600; margin-top: 14px; }
+  button { font: inherit; font-weight: 600; padding: 9px 18px; border-radius: 6px; border: 0;
+           background: var(--accent); color: var(--accent-text); cursor: pointer; }
+  button:disabled { opacity: 0.55; cursor: progress; }
+  a.btn { display: inline-block; text-decoration: none; padding: 8px 14px; border-radius: 6px;
+          border: 1px solid var(--accent); color: var(--accent); font-weight: 600; margin-right: 8px; }
+  details summary { cursor: pointer; color: var(--muted); margin-top: 14px; }
+  #status { font-weight: 600; }
+  #status.err { color: var(--err); } #status.ok { color: var(--ok); }
+  pre#log { background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px;
+            max-height: 240px; overflow: auto; font-size: 0.78rem; white-space: pre-wrap; margin: 10px 0 0; }
+  .tablewrap { overflow-x: auto; margin: 12px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.88rem; }
+  th, td { border-bottom: 1px solid var(--line); padding: 7px 10px; text-align: left; white-space: nowrap; }
+  th { background: var(--code-bg); position: sticky; top: 0; }
+  .note { color: var(--muted); font-size: 0.82rem; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Protein isoform overview &amp; alignments</h1>
+  <p class="sub">Maps each isoform onto the canonical UniProt sequence and reports coverage, structural-feature
+     retention, AlphaFold pLDDT and (optionally) an ESM2 in-silico score.</p>
+
+  <form id="form" class="card" enctype="multipart/form-data">
+    <label for="uniprot_id">Canonical UniProt accession
+      <span class="hint">(the reference your isoforms are compared against)</span></label>
+    <input type="text" id="uniprot_id" name="uniprot_id" value="Q13286" required
+           maxlength="10" autocomplete="off" spellcheck="false">
+
+    <label for="fasta">Isoform FASTA
+      <span class="hint">(protein or cDNA, auto-detected; up to {{ max_records }} records, {{ max_upload_mb }} MB.
+        Leave empty to use the isoforms annotated in UniProt.)</span></label>
+    <input type="file" id="fasta" name="fasta" accept=".fa,.fasta,.faa,.fna,.txt">
+
+    <details>
+      <summary>…or paste FASTA text</summary>
+      <textarea id="fasta_text" name="fasta_text" placeholder=">ENST00000636147.2 gene=CLN3 transcript=CLN3-243&#10;MGGCAGSRRRFSDSEGEETV..."></textarea>
+    </details>
+
+    <label for="feature_type">Feature to track
+      <span class="hint">(auto picks the most-annotated type)</span></label>
+    <select id="feature_type" name="feature_type">
+      {% for t in feature_types %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+    </select>
+
+    {% if dms_enabled %}
+    <label for="dms_model">ESM2 model
+      <span class="hint">(only used if scoring is on)</span></label>
+    <select id="dms_model" name="dms_model">
+      {% for m in models %}<option value="{{ m }}" {% if m == default_model %}selected{% endif %}>{{ m.split('/')[-1] }}</option>{% endfor %}
+    </select>
+
+    <label class="check"><input type="checkbox" id="run_dms" name="run_dms">
+      Compute ESM2 in-silico scores (Mean Predicted Score) <span class="hint">— much slower</span></label>
+    {% endif %}
+
+    <p style="margin-top:18px"><button type="submit" id="go">Run analysis</button></p>
+    <p class="note">Uploaded sequences and results are deleted from the server after about {{ ttl_min }} minutes.</p>
+  </form>
+
+  <section id="result" class="card" hidden>
+    <div id="status"></div>
+    <pre id="log"></pre>
+    <div id="tablebox" hidden>
+      <div class="tablewrap"><table id="tbl"><thead></thead><tbody></tbody></table></div>
+      <p id="dl"></p>
+      <p class="note">
+        Stability Risk and Coverage Heuristic Risk are descriptive flags, not validated pathogenicity calls
+        (the coverage cutoffs are round-number heuristics). Mean Predicted Score, when present, is an ESM2
+        wt-marginal in-silico score, not an experimental DMS measurement. pLDDT is taken from the canonical
+        AlphaFold model and mapped onto retained residues.
+      </p>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const form = document.getElementById("form");
+  const go = document.getElementById("go");
+  const result = document.getElementById("result");
+  const statusEl = document.getElementById("status");
+  const logEl = document.getElementById("log");
+  const tablebox = document.getElementById("tablebox");
+  const tbl = document.getElementById("tbl");
+  const dl = document.getElementById("dl");
+  let timer = null;
+
+  function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = cls || ""; }
+
+  function renderTable(columns, rows) {
+    const thead = tbl.tHead, tbody = tbl.tBodies[0];
+    thead.replaceChildren(); tbody.replaceChildren();
+    const hr = thead.insertRow();
+    columns.forEach(c => { const th = document.createElement("th"); th.textContent = c; hr.appendChild(th); });
+    rows.forEach(r => {
+      const tr = tbody.insertRow();
+      r.forEach(v => { tr.insertCell().textContent = v; });   // textContent: FASTA-derived names can't inject HTML
+    });
+  }
+
+  function renderDownloads(jobId) {
+    dl.replaceChildren();
+    [["display", "Download table (CSV)"], ["raw", "Download raw values (CSV)"]].forEach(([kind, label]) => {
+      const a = document.createElement("a");
+      a.className = "btn"; a.textContent = label;
+      a.href = `/api/jobs/${jobId}/download/${kind}`;
+      dl.appendChild(a);
+    });
+  }
+
+  async function poll(jobId) {
+    try {
+      const res = await fetch(`/api/jobs/${jobId}`);
+      if (!res.ok) throw new Error("Job not found (it may have expired).");
+      const j = await res.json();
+      logEl.textContent = j.log || "";
+      logEl.scrollTop = logEl.scrollHeight;
+
+      if (j.state === "queued")  { setStatus("Queued…"); }
+      else if (j.state === "running") { setStatus(`Running (${j.source || "…"}) — this can take a few minutes…`); }
+      else if (j.state === "done") {
+        clearInterval(timer); go.disabled = false;
+        setStatus(`Done — ${j.rows.length} row(s) for ${j.uniprot_id}.`, "ok");
+        renderTable(j.columns, j.rows); renderDownloads(jobId); tablebox.hidden = false;
+      } else if (j.state === "error") {
+        clearInterval(timer); go.disabled = false;
+        setStatus(j.error || "The analysis failed.", "err");
+      }
+    } catch (e) {
+      clearInterval(timer); go.disabled = false; setStatus(e.message, "err");
+    }
+  }
+
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    clearInterval(timer);
+    go.disabled = true; tablebox.hidden = true; logEl.textContent = "";
+    result.hidden = false; setStatus("Submitting…");
+    try {
+      const res = await fetch("/api/jobs", { method: "POST", body: new FormData(form) });
+      const j = await res.json();
+      if (!res.ok) throw new Error(j.error || "Submission failed.");
+      poll(j.job_id);
+      timer = setInterval(() => poll(j.job_id), 2500);
+    } catch (e) {
+      go.disabled = false; setStatus(e.message, "err");
+    }
+  });
+})();
+</script>
+</body>
+</html>
