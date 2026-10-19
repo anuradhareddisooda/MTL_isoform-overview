@@ -87,7 +87,7 @@
     </select>
 
     <label class="check"><input type="checkbox" id="run_dms" name="run_dms">
-      Compute ESM2 in-silico scores (Mean Predicted Score) <span class="hint">— much slower</span></label>
+      Compute ESM2 scores (Mean Predicted Score and junction scores) <span class="hint">— much slower</span></label>
     {% endif %}
 
     <p style="margin-top:18px"><button type="submit" id="go">Run analysis</button></p>
@@ -100,6 +100,26 @@
     <div id="tablebox" hidden>
       <div class="tablewrap"><table id="tbl"><thead></thead><tbody></tbody></table></div>
       <p id="dl"></p>
+
+      <div id="evbox" hidden>
+        <h2 style="font-size:1.1rem;margin:22px 0 4px">Evidence table</h2>
+        <p class="note" style="margin-top:0">Separate lines of evidence per isoform, not a single risk call.</p>
+        <div class="tablewrap"><table id="evtbl"><thead></thead><tbody></tbody></table></div>
+        <p id="evdl"></p>
+        <p class="note">
+          <b>Event(s)/class</b> come from the sequence alignment. A deletion with the downstream sequence preserved is
+          in-frame at the protein level; a novel C-terminal tail suggests a frameshift or alternative terminal exon.
+          <b>NMD is not assessed</b> (it needs exon coordinates). Very short novel segments can match canonical
+          residues by chance and split one event into several.
+          <b>Signal peptide / TM / domains / sites</b> use the canonical UniProt feature table.
+          <b>Topology flag</b> is a parity heuristic (an odd number of TMs lost upstream of a retained TM may invert
+          its orientation); verify with a topology predictor.
+          <b>Junction delta logp</b> (only if ESM2 scoring is on) is the mean change in masked log-probability of the
+          residues flanking each new junction, isoform versus canonical; more negative means a less plausible junction.
+          It is not calibrated against experimental or clinical outcomes.
+        </p>
+      </div>
+      <p id="everr" class="note" hidden></p>
       <p class="note">
         Stability Risk and Coverage Heuristic Risk are descriptive flags, not validated pathogenicity calls
         (the coverage cutoffs are round-number heuristics). Mean Predicted Score, when present, is an ESM2
@@ -120,12 +140,16 @@
   const tablebox = document.getElementById("tablebox");
   const tbl = document.getElementById("tbl");
   const dl = document.getElementById("dl");
+  const evbox = document.getElementById("evbox");
+  const evtbl = document.getElementById("evtbl");
+  const evdl = document.getElementById("evdl");
+  const everr = document.getElementById("everr");
   let timer = null;
 
   function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = cls || ""; }
 
-  function renderTable(columns, rows) {
-    const thead = tbl.tHead, tbody = tbl.tBodies[0];
+  function renderTable(columns, rows, table = tbl) {
+    const thead = table.tHead, tbody = table.tBodies[0];
     thead.replaceChildren(); tbody.replaceChildren();
     const hr = thead.insertRow();
     columns.forEach(c => { const th = document.createElement("th"); th.textContent = c; hr.appendChild(th); });
@@ -135,13 +159,13 @@
     });
   }
 
-  function renderDownloads(jobId) {
-    dl.replaceChildren();
-    [["display", "Download table (CSV)"], ["raw", "Download raw values (CSV)"]].forEach(([kind, label]) => {
+  function renderDownloads(jobId, target = dl, buttons = [["display", "Download table (CSV)"], ["raw", "Download raw values (CSV)"]]) {
+    target.replaceChildren();
+    buttons.forEach(([kind, label]) => {
       const a = document.createElement("a");
       a.className = "btn"; a.textContent = label;
       a.href = `/api/jobs/${jobId}/download/${kind}`;
-      dl.appendChild(a);
+      target.appendChild(a);
     });
   }
 
@@ -159,6 +183,13 @@
         clearInterval(timer); go.disabled = false;
         setStatus(`Done — ${j.rows.length} row(s) for ${j.uniprot_id}.`, "ok");
         renderTable(j.columns, j.rows); renderDownloads(jobId); tablebox.hidden = false;
+        evbox.hidden = !j.evidence_rows;
+        if (j.evidence_rows) {
+          renderTable(j.evidence_columns, j.evidence_rows, evtbl);
+          renderDownloads(jobId, evdl, [["evidence", "Download evidence table (CSV)"]]);
+        }
+        everr.hidden = !j.evidence_error;
+        everr.textContent = j.evidence_error ? "Evidence table unavailable: " + j.evidence_error : "";
       } else if (j.state === "error") {
         clearInterval(timer); go.disabled = false;
         setStatus(j.error || "The analysis failed.", "err");
@@ -171,7 +202,7 @@
   form.addEventListener("submit", async (ev) => {
     ev.preventDefault();
     clearInterval(timer);
-    go.disabled = true; tablebox.hidden = true; logEl.textContent = "";
+    go.disabled = true; tablebox.hidden = true; evbox.hidden = true; everr.hidden = true; logEl.textContent = "";
     result.hidden = false; setStatus("Submitting…");
     try {
       const res = await fetch("/api/jobs", { method: "POST", body: new FormData(form) });
