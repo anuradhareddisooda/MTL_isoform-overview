@@ -55,6 +55,8 @@ UNIPROT_RE = re.compile(
 )
 JOB_ID_RE = re.compile(r"[0-9a-f]{32}")
 
+EVIDENCE_SCRIPT = Path(os.environ.get("EVIDENCE_SCRIPT", BASE_DIR / "isoform_evidence.py"))
+EVIDENCE_CSV = "isoform_evidence.csv"
 RAW_CSV = "tab1_overview.csv"
 DISPLAY_CSV = "tab1_overview_display.csv"
 
@@ -154,37 +156,52 @@ def validate_fasta(text: str) -> tuple[str, int]:
 # ----------------------------------------------------------------------
 # Job runner
 # ----------------------------------------------------------------------
-def run_job(job_dir: Path, cmd: list[str]) -> None:
+def _run_step(job_dir: Path, cmd: list[str], title: str):
+    """Runs one pipeline step, appending its output to run.log. Returns (returncode, error_or_None)."""
+    env = {
+        **os.environ,
+        "PYTHONUNBUFFERED": "1",
+        "HF_HUB_DISABLE_PROGRESS_BARS": "1",
+        "TOKENIZERS_PARALLELISM": "false",
+    }
+    try:
+        with open(job_dir / "run.log", "ab") as lf:
+            lf.write(f"\n=== {title} ===\n".encode())
+            lf.flush()
+            proc = subprocess.Popen(cmd, cwd=job_dir, stdout=lf, stderr=subprocess.STDOUT, env=env)
+            try:
+                rc = proc.wait(timeout=JOB_TIMEOUT_S)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                return None, f"Timed out after {JOB_TIMEOUT_S // 60} minutes."
+    except Exception as exc:  # could not even start the process
+        return None, f"Could not start: {exc}"
+    return rc, None
+
+
+def _last_log_line(job_dir: Path) -> str:
+    lines = [l for l in log_tail(job_dir).splitlines() if l.strip()]
+    return lines[-1][:300] if lines else ""
+
+
+def run_job(job_dir: Path, cmd: list[str], evidence_cmd: list[str]) -> None:
     with RUN_SLOTS:
         write_status(job_dir, state="running", started=time.time())
-        env = {
-            **os.environ,
-            "PYTHONUNBUFFERED": "1",
-            "HF_HUB_DISABLE_PROGRESS_BARS": "1",
-            "TOKENIZERS_PARALLELISM": "false",
-        }
-        try:
-            with open(job_dir / "run.log", "ab") as lf:
-                proc = subprocess.Popen(cmd, cwd=job_dir, stdout=lf, stderr=subprocess.STDOUT, env=env)
-                try:
-                    rc = proc.wait(timeout=JOB_TIMEOUT_S)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait()
-                    write_status(job_dir, state="error", finished=time.time(),
-                                 error=f"Timed out after {JOB_TIMEOUT_S // 60} minutes.")
-                    return
-        except Exception as exc:  # could not even start the process
-            write_status(job_dir, state="error", finished=time.time(), error=f"Could not start pipeline: {exc}")
+
+        rc, err = _run_step(job_dir, cmd, "Overview table")
+        if err or rc != 0 or not (job_dir / DISPLAY_CSV).exists():
+            msg = err or f"Pipeline failed (exit code {rc}). {_last_log_line(job_dir)}".strip()
+            write_status(job_dir, state="error", finished=time.time(), error=msg)
             return
 
-        if rc == 0 and (job_dir / DISPLAY_CSV).exists():
-            write_status(job_dir, state="done", finished=time.time())
+        # Evidence table is a second step; if it fails the overview table is still returned.
+        rc2, err2 = _run_step(job_dir, evidence_cmd, "Evidence table")
+        if err2 or rc2 != 0 or not (job_dir / EVIDENCE_CSV).exists():
+            msg = err2 or f"Evidence step failed (exit code {rc2}). {_last_log_line(job_dir)}".strip()
+            write_status(job_dir, state="done", finished=time.time(), evidence_error=msg)
         else:
-            lines = [l for l in log_tail(job_dir).splitlines() if l.strip()]
-            hint = lines[-1][:300] if lines else ""
-            write_status(job_dir, state="error", finished=time.time(),
-                         error=f"Pipeline failed (exit code {rc}). {hint}".strip())
+            write_status(job_dir, state="done", finished=time.time())
 
 
 # ----------------------------------------------------------------------
@@ -258,9 +275,16 @@ def create_job():
     else:
         cmd += ["--no-dms"]
 
+    evidence_cmd = [sys.executable, "-u", str(EVIDENCE_SCRIPT),
+                    "--uniprot-id", uniprot_id, "--out", EVIDENCE_CSV, "--device", "cpu"]
+    if fasta_text:
+        evidence_cmd += ["--fasta", "input.fasta"]
+    if run_dms:
+        evidence_cmd += ["--junction-model", model]
+
     write_status(job_dir, state="queued", uniprot_id=uniprot_id, created=time.time(),
                  source="FASTA upload" if fasta_text else "UniProt isoforms", n_records=n_records)
-    threading.Thread(target=run_job, args=(job_dir, cmd), daemon=True).start()
+    threading.Thread(target=run_job, args=(job_dir, cmd, evidence_cmd), daemon=True).start()
     return jsonify(job_id=job_id), 202
 
 
@@ -279,6 +303,11 @@ def job_status(job_id):
         df = pd.read_csv(job_dir / DISPLAY_CSV, dtype=str, keep_default_na=False)
         payload["columns"] = list(df.columns)
         payload["rows"] = df.values.tolist()
+        if (job_dir / EVIDENCE_CSV).exists():
+            ev = pd.read_csv(job_dir / EVIDENCE_CSV, dtype=str, keep_default_na=False)
+            payload["evidence_columns"] = list(ev.columns)
+            payload["evidence_rows"] = ev.values.tolist()
+        payload["evidence_error"] = status.get("evidence_error")
     return jsonify(payload)
 
 
@@ -287,11 +316,11 @@ def download(job_id, kind):
     job_dir = get_job_dir(job_id)
     if read_status(job_dir).get("state") != "done":
         abort(404)
-    files = {"display": DISPLAY_CSV, "raw": RAW_CSV}
-    if kind not in files:
+    files = {"display": DISPLAY_CSV, "raw": RAW_CSV, "evidence": EVIDENCE_CSV}
+    if kind not in files or not (job_dir / files[kind]).exists():
         abort(404)
     uniprot_id = read_status(job_dir).get("uniprot_id", "protein")
-    suffix = "display" if kind == "display" else "raw"
+    suffix = {"display": "display", "raw": "raw", "evidence": "evidence"}[kind]
     return send_file(job_dir / files[kind], mimetype="text/csv", as_attachment=True,
                      download_name=f"{uniprot_id}_isoform_overview_{suffix}.csv")
 
