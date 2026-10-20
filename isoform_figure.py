@@ -26,7 +26,7 @@ DOMAIN_TYPES = ("Domain", "Repeat", "Zinc finger", "Motif", "Coiled coil")
 SITE_TYPES = ("Active site", "Binding site", "Site", "Disulfide bond", "Cross-link")
 ENDPOINT_ONLY = ("Disulfide bond", "Cross-link")
 BAR_TYPES = TOP_TYPES + DOMAIN_TYPES
-MARKER_COLORS = {"Glycosylation": "#e03131", "Modified residue": "#2f9e44", "Lipidation": "#d6336c"}
+MARKER_COLORS = {"Glycosylation": "#e03131", "Modified residue": "#2f9e44", "Lipidation": "#d68233"}
 MAX_MARKERS_PER_TYPE = 40  # skip a marker type entirely if it would clutter the figure
 
 COLORS = {
@@ -140,11 +140,13 @@ def draw_isoform_map(canon_len, feats, isoforms, title="", path_png=None, path_s
     dom_lane_list, n_lanes = _lanes(dom)
     dom_lanes = {id(f): lane for f, lane in dom_lane_list}
 
+    narrow = sorted((f for f in dom if (f["end"] - f["start"] + 1) / canon_len < 0.045), key=lambda f: f["start"])
     h = 0.9                    # row height
     canon_h = h * (0.5 + 0.5 * n_lanes)
     row_gap = 0.55
+    extra = 0.4 if narrow else 0.0   # room for the small name labels under the canonical row
     n = len(isoforms)
-    total_h = canon_h + row_gap + n * (h + row_gap) + 0.8
+    total_h = canon_h + row_gap + extra + n * (h + row_gap) + 0.8
     fig_h = max(3.2, 0.55 * total_h + 1.8)
     fig, ax = plt.subplots(figsize=(12, fig_h))
 
@@ -173,21 +175,30 @@ def draw_isoform_map(canon_len, feats, isoforms, title="", path_png=None, path_s
     for i, f in enumerate(tm_sorted, 1):
         if (f["end"] - f["start"] + 1) / canon_len < 0.045:
             ax.text((f["start"] + f["end"]) / 2 - 0.5, y - 0.28, f"TM{i}", ha="center", va="bottom", fontsize=6, color=COLORS["Transmembrane"])
+    for k, f in enumerate(narrow):
+        lane = dom_lanes.get(id(f), 0)
+        yy = y + h * 0.5 + (lane + 1) * h * 0.5 + 0.05 + (k % 2) * 0.17
+        ax.text((f["start"] + f["end"]) / 2 - 0.5, yy, (f["description"] or f["type"])[:26].replace("$", r"\$"),
+                ha="center", va="top", fontsize=5.5, color=COLORS.get(f["type"], "#555555"))
     ylabels, yticks = [f"Canonical {uniprot_id}".strip() + f" ({canon_len} aa)"], [y + canon_h / 2]
 
     # ---- isoforms ----
-    y = canon_h + row_gap
+    y = canon_h + row_gap + extra
+    any_deleted = any_novel = False
     for iso in isoforms:
         segs = _retained_set(iso["blocks"])
         kept = sum(s1 - s0 for s0, s1 in segs)
         novel, deleted = novel_segments(iso["blocks"], canon_len, iso["length"])
+        any_novel |= bool(novel)
+        any_deleted |= bool(deleted)
 
         for s0, s1 in segs:
             ax.add_patch(Rectangle((s0, y + h * 0.5 - 0.04), s1 - s0, 0.08, fc=BACKBONE, ec="none", zorder=0))
         for d0, d1 in deleted:
             ax.plot([d0, d1], [y + h * 0.5] * 2, color=LOST, lw=1.1, ls=(0, (2, 2)), zorder=1)
             if (d1 - d0) / canon_len > 0.04:
-                ax.text((d0 + d1) / 2, y + h * 0.5 - 0.12, f"\u0394{d1 - d0}", ha="center", va="bottom", fontsize=6.5, color=LOST)
+                ax.text((d0 + d1) / 2, y + h * 0.5 - 0.12, f"\u0394{d1 - d0}", ha="center", va="bottom", fontsize=6.5, color=LOST, zorder=6,
+                        bbox=dict(fc="white", ec="none", pad=0.6, alpha=0.85))
         _draw_features(ax, y, h, feats, segs, outline_lost=True, domain_lanes=None)
         _draw_sites(ax, y, feats, segs)
         for x, cnt in novel:
@@ -212,17 +223,23 @@ def draw_isoform_map(canon_len, feats, isoforms, title="", path_png=None, path_s
     if title:
         ax.set_title(title, fontsize=10, loc="left")
 
-    handles = [
-        Patch(fc=COLORS["Signal"], label="Signal peptide"),
-        Patch(fc=COLORS["Transmembrane"], label="TM helix"),
-        Patch(fc=COLORS["Domain"], alpha=0.6, label="Domain / repeat / motif"),
-        Patch(fill=False, ec="#555555", ls="--", label="Lost part of a feature"),
-        Line2D([0], [0], color=LOST, ls=(0, (2, 2)), lw=1.2, label="Deleted canonical region (\u0394 aa)"),
-        Patch(fc=NOVEL, label="Novel residues (+aa; not to scale)"),
-        Line2D([0], [0], marker="v", color="#222222", lw=0, ms=4, label="Site retained"),
-        Line2D([0], [0], marker="x", color=LOST, lw=0, ms=5, mew=1.1, label="Site lost"),
-    ]
-    names = {"Glycosylation": "Glycosylation site", "Modified residue": "Modified residue (e.g. phospho)",
+    legend_names = {"Signal": "Signal peptide", "Transit peptide": "Transit peptide", "Transmembrane": "TM helix",
+                    "Domain": "Domain", "Repeat": "Repeat", "Zinc finger": "Zinc finger", "Motif": "Motif",
+                    "Coiled coil": "Coiled coil"}
+    present = {ft["type"] for ft in feats}
+    handles = []
+    for t in ("Signal", "Transit peptide", "Transmembrane", "Domain", "Repeat", "Zinc finger", "Motif", "Coiled coil"):
+        if t in present:
+            handles.append(Patch(fc=COLORS[t], alpha=0.9 if t in TOP_TYPES else 0.6, label=legend_names[t]))
+    handles.append(Patch(fill=False, ec="#555555", ls="--", label="Lost part of a feature"))
+    if any_deleted:
+        handles.append(Line2D([0], [0], color=LOST, ls=(0, (2, 2)), lw=1.2, label="Deleted canonical region (\u0394 aa)"))
+    if any_novel:
+        handles.append(Patch(fc=NOVEL, label="Novel residues (+aa; not to scale)"))
+    if any(ft["type"] in SITE_TYPES for ft in feats):
+        handles.append(Line2D([0], [0], marker="v", color="#222222", lw=0, ms=4, label="Site retained"))
+        handles.append(Line2D([0], [0], marker="x", color=LOST, lw=0, ms=5, mew=1.1, label="Site lost"))
+    names = {"Glycosylation": "Glycosylation site (hollow = lost)", "Modified residue": "Modified residue (e.g. phospho)",
              "Lipidation": "Lipidation site"}
     for t in marker_types_drawn:
         handles.append(Line2D([0], [0], marker="o", color=MARKER_COLORS[t], lw=0, ms=4, label=names[t]))
